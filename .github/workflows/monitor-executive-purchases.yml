@@ -46,7 +46,7 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        python monitor_executive_purchases_dart.py
+        python monitor_executive_purchases.py
 
     - name: Upload logs and results
       uses: actions/upload-artifact@v4
