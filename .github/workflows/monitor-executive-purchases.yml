@@ -41,7 +41,7 @@ jobs:
         echo "DART_API_KEY: ${DART_API_KEY:0:10}..."
         echo "TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:10}..."
         echo "TELEGRAM_CHAT_ID: $TELEGRAM_CHAT_ID"
-        python monitor_executive_purchases_dart.py
+        python monitor_executive_purchases.py
 
     - name: Upload logs and results
       uses: actions/upload-artifact@v4
