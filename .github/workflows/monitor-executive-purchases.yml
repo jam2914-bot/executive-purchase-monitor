@@ -31,17 +31,25 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run monitoring script
-      env:
-        DART_API_KEY: ${{ secrets.DART_API_KEY }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: |
-        echo "환경 변수 확인 (보안상 일부만 표시):"
-        echo "DART_API_KEY: ${DART_API_KEY:0:10}..."
-        echo "TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:10}..."
-        echo "TELEGRAM_CHAT_ID: $TELEGRAM_CHAT_ID"
-        python monitor_executive_purchases.py
+   # 기존 실행 단계 교체
+- name: Run monitoring script
+  env:
+    DART_API_KEY: ${{ secrets.DART_API_KEY }}
+    TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+    TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  run: |
+    echo "환경 변수 확인 (보안상 일부만 표시):"
+    echo "DART_API_KEY: ${DART_API_KEY:0:10}..."
+    echo "TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:10}..."
+    echo "TELEGRAM_CHAT_ID: $TELEGRAM_CHAT_ID"
+    
+    # curl로 API 직접 테스트
+    echo "=== curl로 API 직접 테스트 ==="
+    curl -s "https://opendart.fss.or.kr/api/list.json?crtfc_key=${DART_API_KEY}&bgn_de=20250717&end_de=20250719" | head -200
+    
+    # Python 스크립트 실행
+    echo "=== Python 스크립트 실행 ==="
+    python monitor_executive_purchases.py
 
     - name: Upload logs and results
       uses: actions/upload-artifact@v4
