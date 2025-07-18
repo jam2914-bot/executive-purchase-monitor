@@ -2,24 +2,20 @@ name: Monitor Executive Purchases
 
 on:
   schedule:
-    # 평일 9:00 KST (00:00 UTC)
-    - cron: '0 0 * * 1-5'
-    # 평일 11:00 KST (02:00 UTC)  
-    - cron: '0 2 * * 1-5'
-    # 평일 13:00 KST (04:00 UTC)
-    - cron: '0 4 * * 1-5'
-    # 평일 15:00 KST (06:00 UTC)
-    - cron: '0 6 * * 1-5'
-    # 평일 17:00 KST (08:00 UTC)
-    - cron: '0 8 * * 1-5'
-  workflow_dispatch:  # 수동 실행 허용
+    - cron: '0 0 * * 1-5'    # 오전 9시 KST
+    - cron: '0 2 * * 1-5'    # 오전 11시 KST  
+    - cron: '0 4 * * 1-5'    # 오후 1시 KST
+    - cron: '0 6 * * 1-5'    # 오후 3시 KST
+    - cron: '0 8 * * 1-5'    # 오후 5시 KST
+  workflow_dispatch:
 
 env:
-  TZ: Asia/Seoul  # 한국 시간대 설정
+  TZ: Asia/Seoul
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
     - name: Checkout code
@@ -35,52 +31,17 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Install Chrome and setup ChromeDriver
-      run: |
-        # Chrome 설치
-        wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
-
-        # Chrome 버전 확인
-        CHROME_VERSION=$(google-chrome --version | cut -d " " -f3 | cut -d "." -f1-3)
-        echo "Chrome version: $CHROME_VERSION"
-
-        # Chrome for Testing API를 사용하여 ChromeDriver 다운로드
-        # 최신 stable 버전의 ChromeDriver 다운로드 URL 가져오기
-        CHROMEDRIVER_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json" | python3 -c "
-        import sys, json
-        data = json.load(sys.stdin)
-        stable = data['channels']['Stable']
-        for download in stable['downloads']['chromedriver']:
-            if download['platform'] == 'linux64':
-                print(download['url'])
-                break
-        ")
-
-        # ChromeDriver 다운로드 및 설치
-        if [ ! -z "$CHROMEDRIVER_URL" ]; then
-          echo "Downloading ChromeDriver from: $CHROMEDRIVER_URL"
-          wget -O /tmp/chromedriver-linux64.zip "$CHROMEDRIVER_URL"
-          sudo unzip /tmp/chromedriver-linux64.zip -d /tmp/
-          sudo mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/
-          sudo chmod +x /usr/local/bin/chromedriver
-          echo "ChromeDriver installed successfully"
-        else
-          echo "Failed to get ChromeDriver URL, falling back to webdriver-manager"
-          # webdriver-manager를 사용한 대체 방법은 Python 스크립트에서 처리
-        fi
-
-        # ChromeDriver 버전 확인
-        chromedriver --version || echo "ChromeDriver installation may have failed"
-
     - name: Run monitoring script
       env:
+        DART_API_KEY: ${{ secrets.DART_API_KEY }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        python monitor_executive_purchases.py
+        echo "환경 변수 확인 (보안상 일부만 표시):"
+        echo "DART_API_KEY: ${DART_API_KEY:0:10}..."
+        echo "TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:10}..."
+        echo "TELEGRAM_CHAT_ID: $TELEGRAM_CHAT_ID"
+        python monitor_executive_purchases_dart.py
 
     - name: Upload logs and results
       uses: actions/upload-artifact@v4
@@ -90,4 +51,6 @@ jobs:
         path: |
           logs/
           results/
+          *.log
+          *.json
         retention-days: 30
