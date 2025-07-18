@@ -532,7 +532,7 @@ def main():
         logging.info(f"실행 시간: {current_time.strftime('%Y-%m-%d %H:%M:%S KST')}")
 
         # 환경 변수 확인
-        dart_api_key = os.getenv('DART_API_KEY', '470c22abb7b7f515e219c78c7aa92b15fd5a80c0')
+        dart_api_key = os.getenv('DART_API_KEY')
         telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
 
