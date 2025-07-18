@@ -49,15 +49,15 @@ jobs:
 
         # Chrome for Testing API를 사용하여 ChromeDriver 다운로드
         # 최신 stable 버전의 ChromeDriver 다운로드 URL 가져오기
-        CHROMEDRIVER_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json" |           python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-stable = data['channels']['Stable']
-for download in stable['downloads']['chromedriver']:
-    if download['platform'] == 'linux64':
-        print(download['url'])
-        break
-")
+        CHROMEDRIVER_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json" | python3 -c "
+        import sys, json
+        data = json.load(sys.stdin)
+        stable = data['channels']['Stable']
+        for download in stable['downloads']['chromedriver']:
+            if download['platform'] == 'linux64':
+                print(download['url'])
+                break
+        ")
 
         # ChromeDriver 다운로드 및 설치
         if [ ! -z "$CHROMEDRIVER_URL" ]; then
