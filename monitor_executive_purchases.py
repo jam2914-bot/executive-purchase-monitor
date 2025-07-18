@@ -186,12 +186,12 @@ def send_telegram_notification(disclosures):
             else:
                 formatted_date = rcept_dt
             
-            # 개별 공시 메시지 생성
+            # 개별 공시 메시지 생성 (수정된 링크)
             item_message = f"{item_count}. *{corp_name}*\n"
             item_message += f"   📄 {report_nm}\n"
             item_message += f"   👤 제출인: {flr_nm}\n"
             item_message += f"   📅 {formatted_date}\n"
-            item_message += f"   🔗 [KIND에서 확인](https://kind.krx.co.kr/common/disclsviewer.do?method=search&acptno={rcept_no})\n\n"
+            item_message += f"   🔗 [KIND에서 확인](http://kind.krx.co.kr/common/disclsviewer.do?method=search&acptno={rcept_no})\n\n"
             
             # 메시지 길이 체크
             if len(current_message + item_message) > SAFE_MESSAGE_LENGTH:
