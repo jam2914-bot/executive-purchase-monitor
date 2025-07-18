@@ -12,7 +12,7 @@ KST = pytz.timezone('Asia/Seoul')
 def setup_logging():
     """로깅 설정"""
     current_time = datetime.now(KST)
-    log_filename = f"./logs/executive_monitor_improved_{current_time.strftime('%Y%m%d_%H%M%S')}.log"
+    log_filename = f"./logs/executive_monitor_all_{current_time.strftime('%Y%m%d_%H%M%S')}.log"
     
     # logs 디렉토리 생성
     os.makedirs('./logs', exist_ok=True)
@@ -42,14 +42,14 @@ def collect_extended_dart_data():
     masked_key = f"{api_key[:8]}{'*' * 24}{api_key[-8:]}"
     logging.info(f"✅ DART API 키: {masked_key}")
     
-    # 최근 1주일 데이터 수집
+    # 최근 3일 데이터 수집 (더 좁은 범위로 집중)
     end_date = datetime.now(KST)
-    start_date = end_date - timedelta(days=7)
+    start_date = end_date - timedelta(days=3)
     
     bgn_de = start_date.strftime('%Y%m%d')
     end_de = end_date.strftime('%Y%m%d')
     
-    logging.info(f"📅 확장된 조회 기간: {bgn_de} ~ {end_de}")
+    logging.info(f"📅 조회 기간: {bgn_de} ~ {end_de}")
     
     all_data = []
     
@@ -101,68 +101,46 @@ def collect_extended_dart_data():
     logging.info(f"📊 총 {len(all_data)}건의 공시 수집 완료")
     return all_data
 
-def filter_real_market_purchases(data):
-    """실제 장내매수 공시만 정확하게 필터링"""
+def filter_executive_disclosures(data):
+    """임원 관련 공시 모두 포함 (내용 확인 필요)"""
     if not data:
         return []
     
-    market_purchases = []
+    executive_disclosures = []
     
-    # 장내매수 키워드 (우선순위 높음)
-    purchase_keywords = [
-        '장내매수',
-        '장내취득', 
-        '시장매수',
-        '시장취득'
-    ]
-    
-    # 제외할 키워드 (우선순위 높음)
-    exclude_keywords = [
-        '장내매도',
-        '장외매수',
-        '장외매도',
-        '증여',
-        '대여',
-        '신규선임',
-        '행사가액조정',
-        '행사',
-        '전환',
-        '배당',
-        '분할',
-        '합병',
-        '매도',
-        '소각',
-        '상속',
-        '변경',
-        '정정',
-        '취소'
-    ]
-    
-    logging.info("🔍 장내매수 공시 필터링 시작...")
+    logging.info("🔍 임원 관련 공시 필터링 시작...")
     
     for item in data:
         report_nm = item.get('report_nm', '').lower()
         corp_name = item.get('corp_name', '')
         
-        # 1. 먼저 제외할 키워드 체크
-        if any(keyword in report_nm for keyword in exclude_keywords):
-            continue
+        # 임원 관련 공시 모두 포함
+        if '임원' in report_nm:
+            # 명확히 제외할 것들만 제외
+            exclude_keywords = [
+                '신규선임',
+                '해임',
+                '사임',
+                '퇴임',
+                '변경',
+                '정정',
+                '취소',
+                '임원현황',
+                '의결권'
+            ]
             
-        # 2. 장내매수 키워드 체크
-        if any(keyword in report_nm for keyword in purchase_keywords):
-            market_purchases.append(item)
-            logging.info(f"🎯 장내매수 발견: {corp_name} - {item.get('report_nm')}")
+            # 제외 키워드 체크
+            if any(keyword in report_nm for keyword in exclude_keywords):
+                continue
             
-        # 3. 임원 관련 공시에서 추가 분석
-        elif '임원' in report_nm and '매수' in report_nm:
-            market_purchases.append(item)
-            logging.info(f"🎯 임원 매수 발견: {corp_name} - {item.get('report_nm')}")
+            executive_disclosures.append(item)
+            logging.info(f"🎯 임원 관련 공시: {corp_name} - {item.get('report_nm')}")
     
-    logging.info(f"📋 필터링 완료: {len(market_purchases)}건의 장내매수 공시 발견")
-    return market_purchases
+    logging.info(f"📋 필터링 완료: {len(executive_disclosures)}건의 임원 관련 공시 발견")
+    return executive_disclosures
 
-def send_telegram_notification(purchases):
-    """텔레그램 알림 전송"""
+def send_telegram_notification(disclosures):
+    """텔레그램 알림 전송 (수정됨)"""
     try:
         bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         chat_id = os.getenv('TELEGRAM_CHAT_ID')
@@ -171,19 +149,23 @@ def send_telegram_notification(purchases):
             logging.warning("⚠️ 텔레그램 설정이 없습니다.")
             return False
         
-        if not purchases:
-            logging.info("📭 알림할 장내매수 공시가 없습니다.")
+        if not disclosures:
+            logging.info("📭 알림할 공시가 없습니다.")
             return False
         
         # 메시지 생성
-        message = f"🚨 *임원 장내매수 공시 알림*\n\n"
+        message = f"🚨 *임원 관련 공시 알림*\n\n"
         message += f"📅 조회시간: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')}\n"
-        message += f"📊 발견 건수: {len(purchases)}건\n\n"
+        message += f"📊 발견 건수: {len(disclosures)}건\n\n"
+        message += f"⚠️ *수동 확인 필요*\n"
+        message += f"각 공시를 KIND에서 확인하여 장내매수 여부를 판단하세요.\n\n"
         
-        for i, item in enumerate(purchases[:5], 1):  # 최대 5건만 표시
+        for i, item in enumerate(disclosures[:10], 1):  # 최대 10건 표시
             corp_name = item.get('corp_name', '')
             report_nm = item.get('report_nm', '')
             rcept_dt = item.get('rcept_dt', '')
+            rcept_no = item.get('rcept_no', '')
+            flr_nm = item.get('flr_nm', '')
             
             # 날짜 포맷팅
             if rcept_dt and len(rcept_dt) == 8:
@@ -193,12 +175,14 @@ def send_telegram_notification(purchases):
             
             message += f"{i}. *{corp_name}*\n"
             message += f"   📄 {report_nm}\n"
-            message += f"   📅 {formatted_date}\n\n"
+            message += f"   👤 제출인: {flr_nm}\n"
+            message += f"   📅 {formatted_date}\n"
+            message += f"   🔗 [KIND에서 확인](https://kind.krx.co.kr/common/disclsviewer.do?method=search&acptno={rcept_no})\n\n"
         
-        if len(purchases) > 5:
-            message += f"... 외 {len(purchases) - 5}건 더\n\n"
+        if len(disclosures) > 10:
+            message += f"... 외 {len(disclosures) - 10}건 더\n\n"
         
-        message += "🔍 자세한 내용은 로그를 확인하세요."
+        message += "🔍 각 링크를 클릭하여 실제 장내매수 여부를 확인하세요."
         
         # 텔레그램 전송
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -225,40 +209,41 @@ def main():
     """메인 실행 함수"""
     log_file = setup_logging()
     
-    logging.info("=== 임원 장내매수 모니터링 시작 (개선된 버전) ===")
+    logging.info("=== 임원 공시 모니터링 시작 (전체 포함 버전) ===")
     logging.info(f"실행 시간: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}")
     logging.info(f"로그 파일: {log_file}")
     
-    # 1. 확장된 기간으로 DART 데이터 수집
-    extended_data = collect_extended_dart_data()
+    # 1. DART 데이터 수집
+    dart_data = collect_extended_dart_data()
     
-    if extended_data:
-        logging.info(f"✅ 총 {len(extended_data)}건의 공시 수집")
+    if dart_data:
+        logging.info(f"✅ 총 {len(dart_data)}건의 공시 수집")
         
-        # 2. 실제 장내매수 공시 필터링
-        market_purchases = filter_real_market_purchases(extended_data)
+        # 2. 임원 관련 공시 필터링
+        executive_disclosures = filter_executive_disclosures(dart_data)
         
-        if market_purchases:
-            logging.info(f"🎉 {len(market_purchases)}건의 실제 장내매수 공시 발견!")
+        if executive_disclosures:
+            logging.info(f"🎉 {len(executive_disclosures)}건의 임원 관련 공시 발견!")
             
             # 3. 상세 정보 출력
-            logging.info("📊 발견된 장내매수 공시 상세:")
-            for i, item in enumerate(market_purchases, 1):
+            logging.info("📊 발견된 임원 관련 공시 상세:")
+            for i, item in enumerate(executive_disclosures, 1):
                 corp_name = item.get('corp_name', '')
                 report_nm = item.get('report_nm', '')
                 rcept_dt = item.get('rcept_dt', '')
                 flr_nm = item.get('flr_nm', '')
+                rcept_no = item.get('rcept_no', '')
                 
                 logging.info(f"  {i}. {corp_name} ({rcept_dt})")
                 logging.info(f"     📄 {report_nm}")
                 logging.info(f"     👤 제출인: {flr_nm}")
+                logging.info(f"     🔗 https://kind.krx.co.kr/common/disclsviewer.do?method=search&acptno={rcept_no}")
             
             # 4. 텔레그램 알림 전송
-            send_telegram_notification(market_purchases)
+            send_telegram_notification(executive_disclosures)
             
         else:
-            logging.info("📭 실제 장내매수 공시를 찾을 수 없습니다.")
-            logging.info("💡 이는 정상적인 상황입니다. 임원 장내매수는 자주 발생하지 않습니다.")
+            logging.info("📭 임원 관련 공시를 찾을 수 없습니다.")
     else:
         logging.error("❌ DART 데이터 수집 실패")
     
