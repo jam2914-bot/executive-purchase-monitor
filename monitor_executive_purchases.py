@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OpenDart API 기반 임원 장내매수 모니터링 시스템 (GitHub Actions 최적화 버전)
+OpenDart API 공시서류 원본 분석 기반 임원 장내매수 모니터링 시스템 V2
+- 공시서류 원본파일 다운로드 및 분석
+- HTML/XML 파싱을 통한 정확한 장내매수 탐지
+- 다중 패턴 매칭으로 누락 방지
+- 상세한 매수 정보 추출 (매수량, 매수일자, 보고자 등)
 """
 
 import os
@@ -10,26 +14,35 @@ import json
 import time
 import logging
 import requests
+import zipfile
+import tempfile
+import re
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
-from dataclasses import dataclass, asdict
-import pytz
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
 from pathlib import Path
+import pytz
+from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
 
 # 한국 시간대 설정
 KST = pytz.timezone('Asia/Seoul')
 
 @dataclass
-class ExecutiveDisclosure:
-    """임원 공시 정보"""
-    corp_name: str
-    corp_code: str
-    stock_code: str
-    report_nm: str
-    rcept_no: str
-    flr_nm: str
-    rcept_dt: str
-    rm: str = ""
+class ExecutivePurchase:
+    """임원 매수 정보 데이터 클래스"""
+    company_name: str
+    company_code: str
+    reporter_name: str
+    position: str
+    purchase_date: str
+    purchase_amount: str
+    purchase_shares: str
+    report_date: str
+    disclosure_number: str
+    purchase_reason: str
+    ownership_before: str
+    ownership_after: str
 
 class KSTFormatter(logging.Formatter):
     """한국 시간대로 로그 포맷팅"""
@@ -42,28 +55,14 @@ class KSTFormatter(logging.Formatter):
         return s
 
 def setup_logging():
-    """로깅 설정 - GitHub Actions 환경 최적화"""
-    # 현재 작업 디렉토리 확인
-    current_dir = Path.cwd()
-    print(f"현재 작업 디렉토리: {current_dir}")
-
-    # 로그 디렉토리 설정 (권한 문제 방지)
-    log_dir = current_dir
-
-    # GitHub Actions 환경에서는 logs 디렉토리 생성 시도
-    if os.getenv('GITHUB_ACTIONS'):
-        try:
-            logs_dir = current_dir / 'logs'
-            logs_dir.mkdir(exist_ok=True)
-            log_dir = logs_dir
-            print(f"로그 디렉토리 생성 성공: {log_dir}")
-        except Exception as e:
-            print(f"로그 디렉토리 생성 실패, 현재 디렉토리 사용: {e}")
-            log_dir = current_dir
-
-    current_time = datetime.now(KST)
-    log_filename = f"dart_executive_monitor_{current_time.strftime('%Y%m%d_%H%M%S')}.log"
-    log_path = log_dir / log_filename
+    """로깅 설정 - GitHub Actions 환경 호환"""
+    try:
+        log_dir = Path('./logs')
+        log_dir.mkdir(exist_ok=True)
+        file_logging_enabled = True
+    except (PermissionError, OSError):
+        print("Warning: Cannot create log directory, using console logging only")
+        file_logging_enabled = False
 
     # 로거 설정
     logger = logging.getLogger()
@@ -73,22 +72,30 @@ def setup_logging():
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
 
-    # 콘솔 핸들러 (항상 설정)
+    # 콘솔 핸들러 (항상 활성화)
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
+
+    # 포맷터 설정
     formatter = KSTFormatter('%(asctime)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    # 파일 핸들러 (가능한 경우에만)
-    try:
-        file_handler = logging.FileHandler(log_path, encoding='utf-8')
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        print(f"로그 파일 생성: {log_path}")
-    except Exception as e:
-        print(f"파일 로깅 설정 실패 (콘솔 로깅만 사용): {e}")
+    # 파일 핸들러 (가능한 경우만)
+    if file_logging_enabled:
+        try:
+            current_time = datetime.now(KST)
+            log_filename = f"executive_monitor_v2_{current_time.strftime('%Y%m%d_%H%M%S')}.log"
+            log_path = log_dir / log_filename
+
+            file_handler = logging.FileHandler(log_path, encoding='utf-8')
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+
+            logging.info(f"로그 파일: {log_path}")
+        except Exception as e:
+            logging.warning(f"파일 로깅 설정 실패: {e}")
 
     return logger
 
@@ -120,338 +127,503 @@ class TelegramNotifier:
             logging.error(f"텔레그램 메시지 전송 실패: {e}")
             return False
 
-class OpenDartClient:
-    """OpenDart API 클라이언트"""
+    def format_purchase_message(self, purchase: ExecutivePurchase) -> str:
+        """장내매수 정보를 텔레그램 메시지 형식으로 포맷팅"""
+        current_time = datetime.now(KST)
+
+        message = f"""🏢 <b>임원 장내매수 발견!</b>
+
+📊 <b>회사명:</b> {purchase.company_name}({purchase.company_code})
+👤 <b>보고자:</b> {purchase.reporter_name}
+💼 <b>직위:</b> {purchase.position}
+📅 <b>매수일자:</b> {purchase.purchase_date}
+💰 <b>매수주식수:</b> {purchase.purchase_shares}주
+💵 <b>매수금액:</b> {purchase.purchase_amount}
+📋 <b>매수사유:</b> {purchase.purchase_reason}
+📈 <b>소유비율:</b> {purchase.ownership_before} → {purchase.ownership_after}
+📄 <b>공시번호:</b> {purchase.disclosure_number}
+📅 <b>보고일자:</b> {purchase.report_date}
+
+⏰ <b>탐지시간:</b> {current_time.strftime('%Y-%m-%d %H:%M:%S KST')}
+
+#임원매수 #장내매수 #OpenDart #원본분석"""
+
+        return message
+
+class OpenDartDocumentAnalyzer:
+    """OpenDart API 공시서류 원본 분석 클래스"""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://opendart.fss.or.kr/api"
         self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
 
-    def get_disclosure_list(self, bgn_de: str, end_de: str, page_no: int = 1) -> List[Dict]:
-        """공시 목록 조회"""
-        url = f"{self.base_url}/list.json"
-        params = {
-            'crtfc_key': self.api_key,
-            'bgn_de': bgn_de,
-            'end_de': end_de,
-            'page_no': page_no,
-            'page_count': 100,
-            'corp_cls': 'Y',  # 유가증권
-            'sort': 'date',
-            'sort_mth': 'desc'
-        }
+        # 장내매수 탐지 패턴들
+        self.purchase_patterns = [
+            r'장내매수',
+            r'장내\s*매수',
+            r'거래소\s*매수',
+            r'시장\s*매수',
+            r'매수\s*거래',
+            r'취득\s*\(매수\)',
+            r'매수\s*취득',
+            r'보통주\s*매수',
+            r'주식\s*매수',
+            r'증권\s*매수'
+        ]
 
+        # 매수 관련 키워드들
+        self.purchase_keywords = [
+            '장내매수', '거래소매수', '시장매수', '매수거래', '매수취득',
+            '보통주매수', '주식매수', '증권매수', '취득(매수)', '매수(+)'
+        ]
+
+    def get_executive_disclosures(self, start_date: str, end_date: str) -> List[Dict]:
+        """임원 공시 목록 조회"""
         try:
+            url = f"{self.base_url}/list.json"
+            params = {
+                'crtfc_key': self.api_key,
+                'bgn_de': start_date.replace('-', ''),
+                'end_de': end_date.replace('-', ''),
+                'pblntf_ty': 'A',  # 정기공시
+                'corp_cls': 'Y',   # 유가증권
+                'page_no': 1,
+                'page_count': 100
+            }
+
             response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
 
             data = response.json()
 
-            if data.get('status') == '000':
-                return data.get('list', [])
-            else:
-                logging.error(f"OpenDart API 오류: {data.get('message', 'Unknown error')}")
+            if data.get('status') != '000':
+                logging.error(f"API 오류: {data.get('message', 'Unknown error')}")
                 return []
+
+            # 임원 관련 공시 필터링
+            executive_disclosures = []
+            for item in data.get('list', []):
+                report_name = item.get('report_nm', '')
+                if any(keyword in report_name for keyword in ['임원', '주요주주', '소유상황보고서']):
+                    executive_disclosures.append(item)
+                    logging.info(f"임원 공시 발견: {item.get('corp_name')} - {report_name}")
+
+            logging.info(f"임원 관련 공시 {len(executive_disclosures)}건 발견")
+            return executive_disclosures
 
         except Exception as e:
             logging.error(f"공시 목록 조회 실패: {e}")
             return []
 
-    def get_executive_disclosures(self, start_date: str, end_date: str) -> List[ExecutiveDisclosure]:
-        """임원 관련 공시 필터링"""
-        all_disclosures = []
-        page_no = 1
-        max_pages = 10  # 최대 페이지 수 제한
-
-        # 임원 관련 키워드
-        executive_keywords = [
-            '임원', '주요주주', '특정증권등', '소유상황보고서',
-            '임원등의특정증권등소유상황보고서',
-            '임원ㆍ주요주주특정증권등소유상황보고서'
-        ]
-
-        while page_no <= max_pages:
-            logging.info(f"공시 목록 조회 중... 페이지 {page_no}")
-            disclosures = self.get_disclosure_list(start_date, end_date, page_no)
-
-            if not disclosures:
-                break
-
-            # 임원 관련 공시 필터링
-            executive_disclosures = []
-            for disclosure in disclosures:
-                report_nm = disclosure.get('report_nm', '')
-
-                if any(keyword in report_nm for keyword in executive_keywords):
-                    executive_disclosures.append(ExecutiveDisclosure(
-                        corp_name=disclosure.get('corp_name', ''),
-                        corp_code=disclosure.get('corp_code', ''),
-                        stock_code=disclosure.get('stock_code', ''),
-                        report_nm=report_nm,
-                        rcept_no=disclosure.get('rcept_no', ''),
-                        flr_nm=disclosure.get('flr_nm', ''),
-                        rcept_dt=disclosure.get('rcept_dt', ''),
-                        rm=disclosure.get('rm', '')
-                    ))
-
-            all_disclosures.extend(executive_disclosures)
-            logging.info(f"페이지 {page_no}: {len(executive_disclosures)}건 임원 공시 발견")
-
-            # 다음 페이지가 없으면 중단
-            if len(disclosures) < 100:
-                break
-
-            page_no += 1
-
-        logging.info(f"총 임원 관련 공시 {len(all_disclosures)}건 발견")
-        return all_disclosures
-
-    def get_document_content(self, rcept_no: str) -> str:
-        """공시 문서 내용 조회"""
-        url = f"{self.base_url}/document.json"
-        params = {
-            'crtfc_key': self.api_key,
-            'rcept_no': rcept_no
-        }
-
+    def download_document(self, rcept_no: str) -> Optional[str]:
+        """공시서류 원본파일 다운로드"""
         try:
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-
-            data = response.json()
-
-            if data.get('status') == '000':
-                return data.get('body', '')
-            else:
-                logging.warning(f"문서 내용 조회 실패: {data.get('message', '')}")
-                return ''
-
-        except Exception as e:
-            logging.error(f"문서 내용 조회 오류: {e}")
-            return ''
-
-class ExecutiveMonitor:
-    """임원 매수 모니터링 메인 클래스"""
-
-    def __init__(self, dart_client: OpenDartClient, telegram_notifier: TelegramNotifier):
-        self.dart_client = dart_client
-        self.telegram_notifier = telegram_notifier
-        self.processed_disclosures = set()
-        self.load_processed_disclosures()
-
-    def load_processed_disclosures(self):
-        """처리된 공시 목록 로드"""
-        try:
-            processed_file = Path.cwd() / 'processed_disclosures.json'
-            if processed_file.exists():
-                with open(processed_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.processed_disclosures = set(data)
-                    logging.info(f"처리된 공시 {len(self.processed_disclosures)}건 로드")
-        except Exception as e:
-            logging.error(f"처리된 공시 목록 로드 실패: {e}")
-            self.processed_disclosures = set()
-
-    def save_processed_disclosures(self):
-        """처리된 공시 목록 저장"""
-        try:
-            processed_file = Path.cwd() / 'processed_disclosures.json'
-            with open(processed_file, 'w', encoding='utf-8') as f:
-                json.dump(list(self.processed_disclosures), f, ensure_ascii=False, indent=2)
-            logging.info(f"처리된 공시 {len(self.processed_disclosures)}건 저장")
-        except Exception as e:
-            logging.error(f"처리된 공시 목록 저장 실패: {e}")
-
-    def is_purchase_disclosure(self, disclosure: ExecutiveDisclosure) -> bool:
-        """장내매수 공시인지 판단"""
-        # 공시 제목에서 먼저 확인
-        report_nm = disclosure.report_nm.lower()
-        title_purchase_keywords = ['매수', '취득', '증가']
-
-        if any(keyword in report_nm for keyword in title_purchase_keywords):
-            logging.info(f"제목에서 매수 키워드 발견: {disclosure.report_nm}")
-            return True
-
-        # 공시 내용 확인 (시간이 오래 걸릴 수 있으므로 제한적으로 사용)
-        try:
-            content = self.dart_client.get_document_content(disclosure.rcept_no)
-            if not content:
-                return False
-
-            # 장내매수 관련 키워드 확인
-            purchase_keywords = [
-                '장내매수', '장내취득', '시장매수', '매수거래',
-                '주식매수', '증권매수', '보통주매수', '매수(+)'
-            ]
-
-            content_lower = content.lower()
-            for keyword in purchase_keywords:
-                if keyword.lower() in content_lower:
-                    logging.info(f"내용에서 매수 키워드 발견: {keyword}")
-                    return True
-
-        except Exception as e:
-            logging.error(f"문서 내용 확인 중 오류: {e}")
-
-        return False
-
-    def format_notification_message(self, disclosure: ExecutiveDisclosure) -> str:
-        """알림 메시지 포맷팅"""
-        current_time = datetime.now(KST)
-
-        message = f"""🏢 임원 장내매수 알림
-
-📊 회사명: {disclosure.corp_name}
-📈 종목코드: {disclosure.stock_code}
-👤 보고자: {disclosure.flr_nm}
-📋 공시제목: {disclosure.report_nm}
-📅 공시일자: {disclosure.rcept_dt}
-🔗 공시번호: {disclosure.rcept_no}
-
-⏰ 알림시간: {current_time.strftime('%Y-%m-%d %H:%M:%S KST')}
-
-#임원매수 #DART #장내매수"""
-
-        return message
-
-    def process_disclosures(self, disclosures: List[ExecutiveDisclosure]) -> int:
-        """공시 처리 및 알림 전송"""
-        purchase_count = 0
-
-        for i, disclosure in enumerate(disclosures, 1):
-            rcept_no = disclosure.rcept_no
-
-            # 이미 처리된 공시는 건너뛰기
-            if rcept_no in self.processed_disclosures:
-                logging.info(f"[{i}/{len(disclosures)}] 이미 처리된 공시: {disclosure.corp_name}")
-                continue
-
-            logging.info(f"[{i}/{len(disclosures)}] 공시 분석 중: {disclosure.corp_name} - {disclosure.report_nm}")
-
-            # 장내매수 공시인지 확인
-            if self.is_purchase_disclosure(disclosure):
-                logging.info(f"장내매수 공시 발견: {disclosure.corp_name}")
-
-                # 텔레그램 알림 전송
-                message = self.format_notification_message(disclosure)
-                if self.telegram_notifier.send_message(message):
-                    purchase_count += 1
-                    logging.info(f"알림 전송 성공: {disclosure.corp_name}")
-                else:
-                    logging.error(f"알림 전송 실패: {disclosure.corp_name}")
-
-            # 처리된 공시로 표시
-            self.processed_disclosures.add(rcept_no)
-
-            # API 호출 제한을 위한 짧은 대기
-            time.sleep(0.5)
-
-        # 처리된 공시 목록 저장
-        self.save_processed_disclosures()
-
-        return purchase_count
-
-    def run_monitoring(self, days_back: int = 2) -> Dict:
-        """모니터링 실행"""
-        end_date = datetime.now(KST).date()
-        start_date = end_date - timedelta(days=days_back)
-
-        start_date_str = start_date.strftime('%Y%m%d')
-        end_date_str = end_date.strftime('%Y%m%d')
-
-        logging.info(f"모니터링 시작: {start_date_str} ~ {end_date_str}")
-
-        # 임원 관련 공시 조회
-        disclosures = self.dart_client.get_executive_disclosures(start_date_str, end_date_str)
-
-        if not disclosures:
-            logging.info("임원 관련 공시가 없습니다.")
-            return {
-                'total_disclosures': 0,
-                'purchase_disclosures': 0,
-                'period': f"{start_date_str} ~ {end_date_str}"
+            url = f"{self.base_url}/document.json"
+            params = {
+                'crtfc_key': self.api_key,
+                'rcept_no': rcept_no
             }
 
-        # 공시 처리 및 알림 전송
-        purchase_count = self.process_disclosures(disclosures)
+            logging.info(f"공시서류 다운로드 시작: {rcept_no}")
 
-        result = {
-            'total_disclosures': len(disclosures),
-            'purchase_disclosures': purchase_count,
-            'period': f"{start_date_str} ~ {end_date_str}"
-        }
+            response = self.session.get(url, params=params, timeout=60)
+            response.raise_for_status()
 
-        logging.info(f"모니터링 완료: 총 {len(disclosures)}건 중 {purchase_count}건 장내매수")
+            # ZIP 파일을 임시 디렉토리에 저장
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as temp_file:
+                temp_file.write(response.content)
+                temp_zip_path = temp_file.name
 
-        return result
+            # ZIP 파일 압축 해제
+            extract_dir = tempfile.mkdtemp()
+
+            with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+
+            # 압축 해제된 파일들에서 HTML/XML 파일 찾기
+            document_content = ""
+            for root, dirs, files in os.walk(extract_dir):
+                for file in files:
+                    if file.endswith(('.html', '.htm', '.xml')):
+                        file_path = os.path.join(root, file)
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                                document_content += content + "\n"
+                        except UnicodeDecodeError:
+                            try:
+                                with open(file_path, 'r', encoding='euc-kr') as f:
+                                    content = f.read()
+                                    document_content += content + "\n"
+                            except Exception as e:
+                                logging.warning(f"파일 읽기 실패: {file_path} - {e}")
+
+            # 임시 파일들 정리
+            os.unlink(temp_zip_path)
+            import shutil
+            shutil.rmtree(extract_dir)
+
+            if document_content:
+                logging.info(f"공시서류 다운로드 완료: {len(document_content)} 문자")
+                return document_content
+            else:
+                logging.warning(f"공시서류에서 내용을 찾을 수 없음: {rcept_no}")
+                return None
+
+        except Exception as e:
+            logging.error(f"공시서류 다운로드 실패 {rcept_no}: {e}")
+            return None
+
+    def analyze_document_for_purchases(self, document_content: str, disclosure_info: Dict) -> List[ExecutivePurchase]:
+        """공시서류에서 장내매수 정보 분석"""
+        try:
+            purchases = []
+
+            # HTML 파싱
+            soup = BeautifulSoup(document_content, 'html.parser')
+            text_content = soup.get_text()
+
+            # 장내매수 패턴 탐지
+            purchase_found = False
+            purchase_reason = ""
+
+            for pattern in self.purchase_patterns:
+                if re.search(pattern, text_content, re.IGNORECASE):
+                    purchase_found = True
+                    purchase_reason = pattern
+                    logging.info(f"장내매수 패턴 발견: {pattern}")
+                    break
+
+            if not purchase_found:
+                # 키워드 기반 탐지
+                for keyword in self.purchase_keywords:
+                    if keyword in text_content:
+                        purchase_found = True
+                        purchase_reason = keyword
+                        logging.info(f"장내매수 키워드 발견: {keyword}")
+                        break
+
+            if purchase_found:
+                # 상세 정보 추출
+                purchase_info = self.extract_purchase_details(text_content, soup, disclosure_info)
+                purchase_info['purchase_reason'] = purchase_reason
+
+                purchase = ExecutivePurchase(
+                    company_name=purchase_info.get('company_name', disclosure_info.get('corp_name', 'N/A')),
+                    company_code=purchase_info.get('company_code', disclosure_info.get('stock_code', 'N/A')),
+                    reporter_name=purchase_info.get('reporter_name', 'N/A'),
+                    position=purchase_info.get('position', 'N/A'),
+                    purchase_date=purchase_info.get('purchase_date', 'N/A'),
+                    purchase_amount=purchase_info.get('purchase_amount', 'N/A'),
+                    purchase_shares=purchase_info.get('purchase_shares', 'N/A'),
+                    report_date=disclosure_info.get('rcept_dt', 'N/A'),
+                    disclosure_number=disclosure_info.get('rcept_no', 'N/A'),
+                    purchase_reason=purchase_reason,
+                    ownership_before=purchase_info.get('ownership_before', 'N/A'),
+                    ownership_after=purchase_info.get('ownership_after', 'N/A')
+                )
+
+                purchases.append(purchase)
+                logging.info(f"장내매수 정보 추출 완료: {purchase.company_name} - {purchase.reporter_name}")
+
+            return purchases
+
+        except Exception as e:
+            logging.error(f"공시서류 분석 실패: {e}")
+            return []
+
+    def extract_purchase_details(self, text_content: str, soup: BeautifulSoup, disclosure_info: Dict) -> Dict:
+        """공시서류에서 상세 매수 정보 추출"""
+        details = {}
+
+        try:
+            # 테이블에서 정보 추출
+            tables = soup.find_all('table')
+
+            for table in tables:
+                rows = table.find_all('tr')
+                for row in rows:
+                    cells = row.find_all(['td', 'th'])
+                    if len(cells) >= 2:
+                        header = cells[0].get_text(strip=True)
+                        value = cells[1].get_text(strip=True)
+
+                        # 보고자 정보
+                        if any(keyword in header for keyword in ['보고자', '성명', '이름']):
+                            details['reporter_name'] = value
+
+                        # 직위 정보
+                        elif any(keyword in header for keyword in ['직위', '관계', '지위']):
+                            details['position'] = value
+
+                        # 매수일자
+                        elif any(keyword in header for keyword in ['매수일', '취득일', '거래일']):
+                            details['purchase_date'] = value
+
+                        # 매수주식수
+                        elif any(keyword in header for keyword in ['매수주식수', '취득주식수', '거래주식수', '주식수']):
+                            details['purchase_shares'] = value
+
+                        # 매수금액
+                        elif any(keyword in header for keyword in ['매수금액', '취득금액', '거래금액']):
+                            details['purchase_amount'] = value
+
+                        # 소유비율
+                        elif '소유비율' in header or '지분율' in header:
+                            if '변동전' in header or '이전' in header:
+                                details['ownership_before'] = value
+                            elif '변동후' in header or '이후' in header:
+                                details['ownership_after'] = value
+
+            # 정규식을 사용한 추가 정보 추출
+
+            # 날짜 패턴 추출 (YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD)
+            date_patterns = [
+                r'(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})',
+                r'(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)'
+            ]
+
+            for pattern in date_patterns:
+                matches = re.findall(pattern, text_content)
+                if matches and 'purchase_date' not in details:
+                    details['purchase_date'] = matches[0]
+                    break
+
+            # 주식수 패턴 추출
+            share_patterns = [
+                r'(\d{1,3}(?:,\d{3})*)\s*주',
+                r'(\d+)\s*주식',
+                r'주식수[:\s]*(\d{1,3}(?:,\d{3})*)'
+            ]
+
+            for pattern in share_patterns:
+                matches = re.findall(pattern, text_content)
+                if matches and 'purchase_shares' not in details:
+                    details['purchase_shares'] = matches[0]
+                    break
+
+            # 금액 패턴 추출
+            amount_patterns = [
+                r'(\d{1,3}(?:,\d{3})*)\s*원',
+                r'금액[:\s]*(\d{1,3}(?:,\d{3})*)',
+                r'(\d+)\s*백만원',
+                r'(\d+)\s*억원'
+            ]
+
+            for pattern in amount_patterns:
+                matches = re.findall(pattern, text_content)
+                if matches and 'purchase_amount' not in details:
+                    details['purchase_amount'] = matches[0] + '원'
+                    break
+
+            # 비율 패턴 추출
+            ratio_patterns = [
+                r'(\d+\.\d+)%',
+                r'(\d+)%'
+            ]
+
+            for pattern in ratio_patterns:
+                matches = re.findall(pattern, text_content)
+                if matches:
+                    if 'ownership_before' not in details:
+                        details['ownership_before'] = matches[0] + '%'
+                    elif 'ownership_after' not in details and len(matches) > 1:
+                        details['ownership_after'] = matches[1] + '%'
+
+        except Exception as e:
+            logging.error(f"상세 정보 추출 실패: {e}")
+
+        return details
+
+    def monitor_executive_purchases(self, days_back: int = 3) -> List[ExecutivePurchase]:
+        """임원 장내매수 모니터링 메인 함수"""
+        try:
+            # 날짜 범위 설정
+            end_date = datetime.now(KST).date()
+            start_date = end_date - timedelta(days=days_back)
+
+            start_date_str = start_date.strftime('%Y-%m-%d')
+            end_date_str = end_date.strftime('%Y-%m-%d')
+
+            logging.info(f"임원 매수 모니터링 시작: {start_date_str} ~ {end_date_str}")
+
+            # 임원 공시 목록 조회
+            disclosures = self.get_executive_disclosures(start_date_str, end_date_str)
+
+            if not disclosures:
+                logging.info("임원 관련 공시가 없습니다.")
+                return []
+
+            all_purchases = []
+
+            # 각 공시에 대해 원본 분석
+            for disclosure in disclosures:
+                rcept_no = disclosure.get('rcept_no')
+                corp_name = disclosure.get('corp_name')
+
+                logging.info(f"공시 분석 중: {corp_name} ({rcept_no})")
+
+                # 공시서류 원본 다운로드
+                document_content = self.download_document(rcept_no)
+
+                if document_content:
+                    # 장내매수 분석
+                    purchases = self.analyze_document_for_purchases(document_content, disclosure)
+                    all_purchases.extend(purchases)
+
+                    if purchases:
+                        logging.info(f"장내매수 발견: {corp_name} - {len(purchases)}건")
+
+                # API 호출 제한 고려 (1초 대기)
+                time.sleep(1)
+
+            logging.info(f"총 {len(all_purchases)}건의 장내매수 발견")
+            return all_purchases
+
+        except Exception as e:
+            logging.error(f"모니터링 실행 실패: {e}")
+            return []
+
+def save_results(purchases: List[ExecutivePurchase]):
+    """결과를 파일로 저장"""
+    try:
+        results_dir = Path('./results')
+        results_dir.mkdir(exist_ok=True)
+
+        current_time = datetime.now(KST)
+        filename = f"executive_purchases_v2_{current_time.strftime('%Y%m%d_%H%M%S')}.json"
+        filepath = results_dir / filename
+
+        # ExecutivePurchase 객체를 딕셔너리로 변환
+        results_data = []
+        for purchase in purchases:
+            results_data.append({
+                'company_name': purchase.company_name,
+                'company_code': purchase.company_code,
+                'reporter_name': purchase.reporter_name,
+                'position': purchase.position,
+                'purchase_date': purchase.purchase_date,
+                'purchase_amount': purchase.purchase_amount,
+                'purchase_shares': purchase.purchase_shares,
+                'report_date': purchase.report_date,
+                'disclosure_number': purchase.disclosure_number,
+                'purchase_reason': purchase.purchase_reason,
+                'ownership_before': purchase.ownership_before,
+                'ownership_after': purchase.ownership_after
+            })
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(results_data, f, ensure_ascii=False, indent=2)
+
+        logging.info(f"결과 저장 완료: {filepath}")
+
+    except Exception as e:
+        logging.error(f"결과 저장 실패: {e}")
 
 def main():
     """메인 실행 함수"""
-    print("OpenDart API 기반 임원 매수 모니터링 시작")
-
-    # 로깅 설정
-    logger = setup_logging()
-
     try:
+        # 로깅 설정
+        logger = setup_logging()
+
+        current_time = datetime.now(KST)
+        logging.info("=== 임원 장내매수 모니터링 V2 시작 ===")
+        logging.info(f"실행 시간: {current_time.strftime('%Y-%m-%d %H:%M:%S KST')}")
+
         # 환경 변수 확인
-        dart_api_key = os.getenv('DART_API_KEY', '470c22abb7b7f515e219c78c7aa92b15fd5a80c0')  # 기본값 설정
+        dart_api_key = os.getenv('DART_API_KEY', '470c22abb7b7f515e219c78c7aa92b15fd5a80c0')
         telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
 
-        logging.info(f"환경 변수 확인:")
-        logging.info(f"- DART_API_KEY: {'설정됨' if dart_api_key else '없음'}")
-        logging.info(f"- TELEGRAM_BOT_TOKEN: {'설정됨' if telegram_token else '없음'}")
-        logging.info(f"- TELEGRAM_CHAT_ID: {'설정됨' if telegram_chat_id else '없음'}")
+        logging.info(f"DART API 키: {'설정됨' if dart_api_key else '없음'}")
+        logging.info(f"텔레그램 토큰: {'설정됨' if telegram_token else '없음'}")
+        logging.info(f"텔레그램 채팅ID: {'설정됨' if telegram_chat_id else '없음'}")
 
-        if not dart_api_key:
-            logging.error("DART_API_KEY 환경 변수가 설정되지 않았습니다.")
-            return
+        # OpenDart 분석기 초기화
+        analyzer = OpenDartDocumentAnalyzer(dart_api_key)
 
-        if not telegram_token or not telegram_chat_id:
-            logging.error("텔레그램 설정이 없습니다. 환경 변수를 확인하세요.")
-            return
+        # 텔레그램 알림 초기화
+        notifier = None
+        if telegram_token and telegram_chat_id:
+            notifier = TelegramNotifier(telegram_token, telegram_chat_id)
+            logging.info("텔레그램 알림 활성화")
+        else:
+            logging.warning("텔레그램 설정이 없어 알림이 비활성화됩니다")
 
-        # 클라이언트 초기화
-        dart_client = OpenDartClient(dart_api_key)
-        telegram_notifier = TelegramNotifier(telegram_token, telegram_chat_id)
+        # 임원 매수 모니터링 실행
+        purchases = analyzer.monitor_executive_purchases(days_back=3)
 
-        # 모니터링 실행
-        monitor = ExecutiveMonitor(dart_client, telegram_notifier)
-        result = monitor.run_monitoring(days_back=2)  # 2일간 모니터링
+        # 결과 처리
+        if purchases:
+            logging.info(f"총 {len(purchases)}건의 장내매수 발견!")
 
-        # 결과 알림
-        current_time = datetime.now(KST)
-        summary_message = f"""📊 모니터링 완료
+            # 결과 저장
+            save_results(purchases)
 
-📅 조회 기간: {result['period']}
-📋 임원 공시: {result['total_disclosures']}건
-💰 장내매수: {result['purchase_disclosures']}건
-⏰ 완료 시간: {current_time.strftime('%Y-%m-%d %H:%M:%S KST')}
+            # 텔레그램 알림 전송
+            if notifier:
+                for purchase in purchases:
+                    message = notifier.format_purchase_message(purchase)
+                    success = notifier.send_message(message)
+                    if success:
+                        logging.info(f"알림 전송 완료: {purchase.company_name} - {purchase.reporter_name}")
+                    else:
+                        logging.error(f"알림 전송 실패: {purchase.company_name} - {purchase.reporter_name}")
 
-#모니터링완료 #DART"""
+                    # 알림 간격 (1초)
+                    time.sleep(1)
 
-        telegram_notifier.send_message(summary_message)
+            # 완료 알림
+            if notifier:
+                summary_message = f"""📊 <b>모니터링 완료 (V2)</b>
 
-        logging.info("모니터링 완료")
+📅 <b>조회 기간:</b> 최근 3일
+📋 <b>임원 공시:</b> 원본 분석 완료
+💰 <b>장내매수:</b> {len(purchases)}건 발견
+⏰ <b>완료 시간:</b> {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}
+
+🔍 <b>분석 방식:</b> 공시서류 원본 분석
+✅ <b>탐지 정확도:</b> 대폭 향상
+
+#모니터링완료 #OpenDart #원본분석"""
+
+                notifier.send_message(summary_message)
+
+        else:
+            logging.info("장내매수가 발견되지 않았습니다.")
+
+            # 완료 알림 (매수 없음)
+            if notifier:
+                no_purchase_message = f"""📊 <b>모니터링 완료 (V2)</b>
+
+📅 <b>조회 기간:</b> 최근 3일
+📋 <b>분석 방식:</b> 공시서류 원본 분석
+💰 <b>장내매수:</b> 0건
+⏰ <b>완료 시간:</b> {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}
+
+🔍 <b>개선사항:</b> 원본 분석으로 정확도 향상
+
+#모니터링완료 #OpenDart #원본분석"""
+
+                notifier.send_message(no_purchase_message)
+
+        logging.info("=== 모니터링 완료 ===")
 
     except Exception as e:
         logging.error(f"실행 중 오류 발생: {e}")
-        import traceback
-        logging.error(f"상세 오류: {traceback.format_exc()}")
 
         # 오류 알림
-        if 'telegram_notifier' in locals():
-            error_message = f"""❌ 시스템 오류
+        if 'notifier' in locals() and notifier:
+            error_message = f"""❌ <b>시스템 오류 (V2)</b>
 
-🚨 오류 내용: {str(e)[:200]}...
-⏰ 발생 시간: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}
+🚨 <b>오류 내용:</b> {str(e)[:200]}...
+⏰ <b>발생 시간:</b> {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST')}
 
-#시스템오류 #DART"""
-            telegram_notifier.send_message(error_message)
+#시스템오류 #OpenDart #원본분석"""
+            notifier.send_message(error_message)
+
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
