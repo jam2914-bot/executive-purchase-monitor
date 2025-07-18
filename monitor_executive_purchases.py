@@ -162,7 +162,7 @@ def send_telegram_notification(disclosures):
         header_message += f"📅 조회시간: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')}\n"
         header_message += f"📊 총 발견 건수: {len(disclosures)}건\n\n"
         header_message += f"⚠️ *수동 확인 필요*\n"
-        header_message += f"각 공시를 KIND에서 확인하여 장내매수 여부를 판단하세요.\n\n"
+        header_message += f"각 공시를 DART에서 확인하여 장내매수 여부를 판단하세요.\n\n"
         
         # 첫 번째 메시지 전송
         send_single_message(bot_token, chat_id, header_message)
@@ -186,12 +186,12 @@ def send_telegram_notification(disclosures):
             else:
                 formatted_date = rcept_dt
             
-            # 개별 공시 메시지 생성 (수정된 링크)
+            # 개별 공시 메시지 생성 (DART 링크)
             item_message = f"{item_count}. *{corp_name}*\n"
             item_message += f"   📄 {report_nm}\n"
             item_message += f"   👤 제출인: {flr_nm}\n"
             item_message += f"   📅 {formatted_date}\n"
-            item_message += f"   🔗 [KIND에서 확인](http://kind.krx.co.kr/common/disclsviewer.do?method=search&acptno={rcept_no})\n\n"
+            item_message += f"   🔗 [DART에서 확인](https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no})\n\n"
             
             # 메시지 길이 체크
             if len(current_message + item_message) > SAFE_MESSAGE_LENGTH:
