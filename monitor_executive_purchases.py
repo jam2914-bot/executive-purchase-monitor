@@ -42,9 +42,9 @@ def collect_extended_dart_data():
     masked_key = f"{api_key[:8]}{'*' * 24}{api_key[-8:]}"
     logging.info(f"✅ DART API 키: {masked_key}")
     
-    # 최근 3일 데이터 수집 (더 좁은 범위로 집중)
+    # 최근 1일 데이터 수집 (더 좁은 범위로 집중)
     end_date = datetime.now(KST)
-    start_date = end_date - timedelta(days=3)
+    start_date = end_date - timedelta(days=1)
     
     bgn_de = start_date.strftime('%Y%m%d')
     end_de = end_date.strftime('%Y%m%d')
