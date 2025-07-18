@@ -42,7 +42,8 @@ class KSTFormatter(logging.Formatter):
 # 로깅 설정
 def setup_logging():
     """로깅 설정"""
-    log_dir = '/home/user/output/logs'
+    # 현재 작업 디렉토리 기준으로 logs 디렉토리 생성
+    log_dir = './logs'
     os.makedirs(log_dir, exist_ok=True)
 
     current_time = datetime.now(KST)
@@ -52,6 +53,10 @@ def setup_logging():
     # 로거 설정
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
+
+    # 기존 핸들러 제거 (중복 방지)
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
 
     # 파일 핸들러
     file_handler = logging.FileHandler(log_path, encoding='utf-8')
@@ -142,7 +147,6 @@ class KindMonitor:
             chrome_options.add_argument('--disable-extensions')
             chrome_options.add_argument('--disable-plugins')
             chrome_options.add_argument('--disable-images')  # 이미지 로딩 비활성화
-            chrome_options.add_argument('--disable-javascript')  # JavaScript 비활성화 (필요시)
             chrome_options.add_argument('--memory-pressure-off')
             chrome_options.add_argument('--max_old_space_size=4096')
 
@@ -325,7 +329,8 @@ class KindMonitor:
 def save_results(results: List[Dict]):
     """결과를 파일로 저장"""
     try:
-        results_dir = '/home/user/output/results'
+        # 현재 작업 디렉토리 기준으로 results 디렉토리 생성
+        results_dir = './results'
         os.makedirs(results_dir, exist_ok=True)
 
         current_time = datetime.now(KST)
