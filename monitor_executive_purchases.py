@@ -155,7 +155,7 @@ def send_telegram_notification(disclosures):
         
         # 메시지 분할 설정
         MAX_MESSAGE_LENGTH = 4000  # 텔레그램 최대 4096자, 안전 마진 고려
-        SAFE_MESSAGE_LENGTH = 600  # 사용자 요청 길이
+        SAFE_MESSAGE_LENGTH = 2000  # 사용자 요청 길이
         
         # 헤더 메시지 생성
         header_message = f"🚨 *임원 관련 공시 알림*\n\n"
